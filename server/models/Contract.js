@@ -52,11 +52,10 @@ location: {
     },
 
     // 💰 Payment Details
-  payment: {
-  totalAmount: Number,
-  advancePaid: { type: Number, default: 0 },
-  remainingAmount: Number,
-  isAdvancePaid: { type: Boolean, default: false },
+ payment: {
+  totalAmount: Number,     // crop value (fixed)
+  fundedAmount: Number,    // stage investments
+  finalPayable: Number,    // calculated ONLY at end
 },
 
     // 📅 Scheduled Payments
@@ -76,24 +75,13 @@ location: {
   },
 ],
 
-    paymentHistory: [
+   paymentHistory: [
   {
-    amount: {
-      type: Number,
-      required: true,
-    },
-    type: {
-      type: String,
-      enum: ["advance", "installment", "final"],
-      required: true,
-    },
-    date: {
-      type: Date,
-      default: Date.now,
-    },
-  },
+    type: { type: String }, // "advance", "installment", "stage"
+    amount: Number,
+    date: { type: Date, default: Date.now }
+  }
 ],
-
     // ⚖️ Risk Sharing
     riskSharing: {
       enabled: Boolean,
@@ -107,6 +95,12 @@ location: {
       coverageAmount: Number,
       status: String,
     },
+
+    readyForSale: {
+  type: Boolean,
+  default: false,
+},
+    
 
     // 📜 Agreement
    agreement: {

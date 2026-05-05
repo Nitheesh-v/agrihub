@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { useSelector } from "react-redux";
 import { getFarmerContracts } from "@/services/contractService";
 import { Link } from "react-router-dom";
-
+import API from "@/services/api";
 const S = `
 @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600&family=Playfair+Display:wght@600&display=swap');
 .fd{font-family:'DM Sans',sans-serif;}
@@ -97,6 +97,24 @@ const totalEarned = approved.reduce((a, c) => {
     amount: s.amount,
     status: s.status,
   })) || [];
+
+  
+};
+
+const handleReady = async (contractId) => {
+  try {
+    await API.post(
+      "/api/contracts/ready",
+      { contractId },
+      { headers: { Authorization: `Bearer ${token}` } }
+    );
+
+    alert("Marked as ready for sale ✅");
+    fetchContracts();
+
+  } catch (err) {
+    alert("Failed ❌");
+  }
 };
   return (
     <div className="fd">
@@ -175,7 +193,19 @@ const totalEarned = approved.reduce((a, c) => {
     <div style={{ fontSize: ".7rem", color: "#9ca3af", marginBottom: "4px" }}>
       Payment Stages
     </div>
-
+{!c.readyForSale ? (
+  <button
+    className="fd-btn-primary"
+    style={{ marginTop: "10px" }}
+    onClick={() => handleReady(c._id)}
+  >
+    ✅ Mark Ready for Sale
+  </button>
+) : (
+  <div style={{ marginTop: "10px", color: "#16a34a", fontWeight: "600" }}>
+    ✔ Ready for Sale
+  </div>
+)}
     {c.paymentSchedule.map((s, idx) => (
       <div key={idx} style={{
         display: "flex",
@@ -191,6 +221,7 @@ const totalEarned = approved.reduce((a, c) => {
           ₹{s.amount} — {s.status === "paid" ? "✅ Paid" : "⏳ Pending"}
         </span>
       </div>
+      
     ))}
   </div>
 )}

@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
-import { getCompanyContracts, approveFarmer, payAdvance, payInstallment, createInstallmentOrder, downloadAgreement, signAgreement } from "@/services/contractService";
-import API from "@/services/api";
+import { getCompanyContracts, approveFarmer, payAdvance, createInstallmentOrder, downloadAgreement, signAgreement, finalPayment, payStage } from "@/services/contractService";
 import { useSelector } from "react-redux";
 import axios from "axios";
+import API from "@/services/api";
 
 
 const S = `
@@ -71,10 +71,10 @@ const S = `
 @media(max-width:640px){.cc-actions{flex-direction:column;}.cc-action-btn{width:100%;justify-content:center;}.cc-payments{grid-template-columns:repeat(3,1fr);}.cc-head-right{flex-direction:column;align-items:flex-end;}.cc-title{font-size:1.4rem;}}
 `;
 
-const CROP_EMOJI = { tomato:"🍅", wheat:"🌾", rice:"🍚", corn:"🌽", cotton:"🌿", onion:"🧅", potato:"🥔" };
-const getCropEmoji = (name) => Object.entries(CROP_EMOJI).find(([k]) => (name||"").toLowerCase().includes(k))?.[1] || "🌱";
+const CROP_EMOJI = { tomato: "🍅", wheat: "🌾", rice: "🍚", corn: "🌽", cotton: "🌿", onion: "🧅", potato: "🥔" };
+const getCropEmoji = (name) => Object.entries(CROP_EMOJI).find(([k]) => (name || "").toLowerCase().includes(k))?.[1] || "🌱";
 
-const initials = (name) => (name||"?").split(" ").map(w=>w[0]).join("").slice(0,2).toUpperCase();
+const initials = (name) => (name || "?").split(" ").map(w => w[0]).join("").slice(0, 2).toUpperCase();
 
 export default function CompanyContracts() {
   const [contracts, setContracts] = useState([]);
@@ -116,31 +116,71 @@ export default function CompanyContracts() {
       const options = {
         key: import.meta.env.VITE_RAZORPAY_KEY, amount: order.amount, currency: "INR", order_id: order.id,
         handler: async (response) => {
-   await API.post(
-  "/api/contracts/verify-installment",
-  {
-    contractId: contract._id,
-    amount,
+          await API.post(
+            "/api/contracts/verify-installment",
+            {
+              contractId: contract._id,
+              amount,
 
-    razorpay_payment_id: response.razorpay_payment_id,
-    razorpay_order_id: response.razorpay_order_id,
-    razorpay_signature: response.razorpay_signature,
-  },
-  {
-    headers: { Authorization: `Bearer ${token}` },
-  }
-);
+              razorpay_payment_id: response.razorpay_payment_id,
+              razorpay_order_id: response.razorpay_order_id,
+              razorpay_signature: response.razorpay_signature,
+            },
+            {
+              headers: { Authorization: `Bearer ${token}` },
+            }
+          );
           fetchContracts();
         },
       };
       if (amount > contract.payment.remainingAmount) {
-  alert("Cannot pay more than remaining amount");
-  return;
-}
+        alert("Cannot pay more than remaining amount");
+        return;
+      }
       new window.Razorpay(options).open();
     } catch (error) { console.log(error.response?.data || error.message); alert("Payment failed ❌"); }
   };
 
+const handleFinalPay = async (contract) => {
+  try {
+    const { data } = await API.post(
+      "/api/contracts/final/create",
+      { contractId: contract._id },
+      { headers: { Authorization: `Bearer ${token}` } }
+    );
+
+    const options = {
+      key: import.meta.env.VITE_RAZORPAY_KEY,
+      amount: data.order.amount,
+      currency: "INR",
+      order_id: data.order.id,
+
+      handler: async (response) => {
+        await API.post(
+          "/api/contracts/final/verify",
+          {
+            contractId: contract._id,
+            razorpay_payment_id: response.razorpay_payment_id,
+            razorpay_order_id: response.razorpay_order_id,
+            razorpay_signature: response.razorpay_signature,
+          },
+          {
+            headers: { Authorization: `Bearer ${token}` },
+          }
+        );
+
+        alert("Final payment successful ✅");
+        fetchContracts();
+      },
+    };
+
+    new window.Razorpay(options).open();
+
+  } catch (err) {
+    console.error(err.response?.data || err.message);
+    alert(err.response?.data?.message || "Final payment failed ❌");
+  }
+};
   const handleSign = async (id) => {
     try { await signAgreement(id, token); fetchContracts(); }
     catch { alert("Error signing"); }
@@ -155,16 +195,22 @@ export default function CompanyContracts() {
     } catch { alert("Download failed"); }
   };
 
-
- const handleStagePayment = async (contractId, stage) => {
+const handleStagePayment = async (contractId, stage) => {
   try {
-    // 1️⃣ Create Order (use API instead of axios)
+    if (!contractId || !stage) {
+      alert("Invalid contract or stage");
+      return;
+    }
+
+    const cleanStage = stage.trim().toLowerCase();
+
+    console.log("🚀 Stage Sent:", cleanStage);
+
+    // ✅ CREATE ORDER
     const { data } = await API.post(
       "/api/contracts/stage/create",
-      { contractId, stage },
-      {
-        headers: { Authorization: `Bearer ${token}` },
-      }
+      { contractId, stage: cleanStage },
+      { headers: { Authorization: `Bearer ${token}` } }
     );
 
     const options = {
@@ -175,12 +221,14 @@ export default function CompanyContracts() {
 
       handler: async function (response) {
         try {
-          // 2️⃣ Verify Payment (IMPORTANT: also use API + headers)
+          console.log("✅ Payment Success:", response);
+
+          // ✅ VERIFY
           await API.post(
             "/api/contracts/stage/verify",
             {
               contractId,
-              stage,
+              stage: cleanStage,
               razorpay_payment_id: response.razorpay_payment_id,
               razorpay_order_id: response.razorpay_order_id,
               razorpay_signature: response.razorpay_signature,
@@ -190,27 +238,26 @@ export default function CompanyContracts() {
             }
           );
 
-          alert("Payment Successful ✅");
-
-          // 🔄 Refresh contracts
+          alert(`✅ ${cleanStage} funded successfully`);
           fetchContracts();
+
         } catch (err) {
-          console.error("Verify failed:", err);
-          alert("Payment verification failed ❌");
+          console.error("❌ VERIFY ERROR:", err.response?.data || err.message);
+          alert(err.response?.data?.message || "Verification failed ❌");
         }
       },
     };
 
-    const rzp = new window.Razorpay(options);
-    rzp.open();
+    new window.Razorpay(options).open();
 
   } catch (err) {
-    console.error("Stage Payment Error:", err.response?.data || err.message);
-    alert("Payment failed ❌");
+    console.error("❌ CREATE ERROR:", err.response?.data || err.message);
+    alert(err.response?.data?.message || "Payment failed ❌");
   }
 };
 
- return (
+
+return (
   <div className="cc">
     <style>{S}</style>
 
@@ -234,6 +281,15 @@ export default function CompanyContracts() {
       <div className="cc-list">
         {contracts.map((c, i) => {
           const isExpanded = expanded[c._id];
+
+          const allStagesPaid =
+            c.paymentSchedule?.length > 0 &&
+            c.paymentSchedule.every((s) => s.status === "paid");
+
+          // ✅ CHECK FINAL ALREADY PAID
+          const isFinalPaid = c.paymentHistory?.some(
+            (p) => p.type === "final"
+          );
 
           return (
             <div
@@ -272,36 +328,30 @@ export default function CompanyContracts() {
 
               {/* PAYMENT SUMMARY */}
               <div className="cc-payments">
-                {[
-                  ["Total value", `₹${c.payment?.totalAmount ?? 0}`, "total"],
-                  ["Advance paid", `₹${c.payment?.advancePaid ?? 0}`, "paid"],
-                  ["Remaining", `₹${c.payment?.remainingAmount ?? 0}`, "remaining"],
-                ].map(([l, v, cls]) => (
-                  <div key={l} className="cc-payment-cell">
-                    <div className="cc-payment-label">{l}</div>
-                    <div className={`cc-payment-val ${cls}`}>{v}</div>
+                <div className="cc-payment-cell">
+                  <div className="cc-payment-label">Total value</div>
+                  <div className="cc-payment-val total">
+                    ₹{c.payment?.totalAmount ?? 0}
                   </div>
-                ))}
+                </div>
+
+                <div className="cc-payment-cell">
+                  <div className="cc-payment-label">Funded</div>
+                  <div className="cc-payment-val paid">
+                    ₹{c.payment?.fundedAmount ?? 0}
+                  </div>
+                </div>
+
+                <div className="cc-payment-cell">
+                  <div className="cc-payment-label">Final Payable</div>
+                  <div className="cc-payment-val remaining">
+                    ₹{Math.max(c.payment?.finalPayable ?? 0, 0)}
+                  </div>
+                </div>
               </div>
 
               {/* ACTIONS */}
               <div className="cc-actions">
-                {(c.status === "approved" || c.status === "active") && (
-                  <button
-                    className="cc-action-btn pay-advance"
-                    onClick={() => handlePayAdvance(c)}
-                  >
-                    💰 Pay advance
-                  </button>
-                )}
-
-                <button
-                  className="cc-action-btn installment"
-                  onClick={() => handleInstallment(c)}
-                >
-                  💳 Pay installment
-                </button>
-
                 {!c.agreement?.companySigned && (
                   <button
                     className="cc-action-btn sign"
@@ -319,9 +369,35 @@ export default function CompanyContracts() {
                 </button>
               </div>
 
-              {/* 🔽 EXPANDED SECTION */}
+              {/* EXPANDED */}
               {isExpanded && (
                 <div className="cc-expanded">
+
+                  {/* FINANCIAL BREAKDOWN */}
+                  <div className="cc-section-label">Financial Breakdown</div>
+
+                  <div className="cc-payment-cell">
+                    <div className="cc-payment-label">Crop Total Price</div>
+                    <div className="cc-payment-val total">
+                      ₹{c.payment?.totalAmount ?? 0}
+                    </div>
+                  </div>
+
+                  <div className="cc-payment-cell">
+                    <div className="cc-payment-label">Company Investment</div>
+                    <div className="cc-payment-val paid">
+                      ₹{c.payment?.fundedAmount ?? 0}
+                    </div>
+                  </div>
+
+                  <div className="cc-payment-cell">
+                    <div className="cc-payment-label">
+                      Final Payable (After Investment)
+                    </div>
+                    <div className="cc-payment-val remaining">
+                      ₹{Math.max(c.payment?.finalPayable ?? 0, 0)}
+                    </div>
+                  </div>
 
                   {/* PAYMENT SCHEDULE */}
                   <div className="cc-section-label">Payment Schedule</div>
@@ -342,30 +418,44 @@ export default function CompanyContracts() {
                       <div>
                         <div style={{ fontWeight: "600" }}>
                           {stage.stage}
+
+                          {stage.status === "pending" && (
+                            <button
+                              className="cc-action-btn installment"
+                              onClick={() =>
+                                handleStagePayment(
+                                  c._id,
+                                  stage.stage?.toLowerCase().trim()
+                                )
+                              }
+                            >
+                              💰 Fund Stage
+                            </button>
+                          )}
                         </div>
+
                         <div style={{ fontSize: "0.8rem" }}>
                           ₹{stage.amount}
                         </div>
                       </div>
 
-                      <div style={{ display: "flex", gap: "10px" }}>
-                        <span className={`cc-badge ${stage.status}`}>
-                          {stage.status}
-                        </span>
-
-                        {stage.status === "pending" && (
-                          <button
-                            className="cc-action-btn installment"
-                            onClick={() =>
-                              handleStagePayment(c._id, stage.stage)
-                            }
-                          >
-                            Pay
-                          </button>
-                        )}
-                      </div>
+                      <span className={`cc-badge ${stage.status}`}>
+                        {stage.status}
+                      </span>
                     </div>
                   ))}
+
+                  {/* ✅ FINAL PAYMENT BUTTON FIX */}
+                  {allStagesPaid &&
+                    !isFinalPaid &&
+                    c.payment?.finalPayable > 0 && (
+                      <button
+                        className="cc-action-btn pay-advance"
+                        onClick={() => handleFinalPay(c)}
+                      >
+                        💵 Pay Final ₹{c.payment.finalPayable}
+                      </button>
+                  )}
 
                   {/* APPLICANTS */}
                   <div className="cc-section-label">
@@ -408,15 +498,22 @@ export default function CompanyContracts() {
                     ))
                   )}
 
-                  {/* PAYMENT HISTORY */}
+                  {/* PAYMENT HISTORY (NO DUPLICATE FINAL) */}
                   {c.paymentHistory?.length > 0 && (
                     <>
                       <div className="cc-section-label">
                         Payment history
                       </div>
-                      {c.paymentHistory.map((p, idx) => (
+
+                      {[...new Map(
+                        c.paymentHistory.map(p => [p.type, p])
+                      ).values()].map((p, idx) => (
                         <div key={idx} className="cc-history-row">
-                          <span>{p.type}</span>
+                          <span>
+                            {p.type === "final"
+                              ? "Final Crop Payment"
+                              : `Stage: ${p.type}`}
+                          </span>
                           <span>₹{p.amount}</span>
                         </div>
                       ))}

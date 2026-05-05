@@ -88,3 +88,27 @@ export const verifyInstallment = (data, token) =>
   API.post("/api/contracts/verify-installment", data, {
     headers: { Authorization: `Bearer ${token}` },
   });
+
+  // ✅ NEW: Stage Funding
+export const payStage = (data, token) =>
+  API.post("/api/contracts/stage/pay", data, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+
+// ✅ NEW: Final Payment
+export const finalPayment = (data, token) => {
+  return API.post("/api/contracts/final/pay", data, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+};
+
+
+export const markReadyForSale = (contractId, token) => {
+  return API.post(
+    "/api/contracts/ready",
+    { contractId },
+    {
+      headers: { Authorization: `Bearer ${token}` },
+    }
+  );
+};

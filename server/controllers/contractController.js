@@ -7,7 +7,6 @@ const PDFDocument = require("pdfkit");
 const Razorpay = require("razorpay");
 const crypto = require("crypto");
 
-
 // 🏢 Company creates contract
 exports.createContract = async (req, res) => {
   try {
@@ -15,36 +14,15 @@ exports.createContract = async (req, res) => {
       cropName,
       quantity,
       price,
-      advancePaid,
       location,
-      riskSharing,
-      insurance,
+      paymentSchedule,
     } = req.body;
 
-    // ✅ Calculate total
-    const totalAmount = price * quantity;
+    if (!paymentSchedule || !Array.isArray(paymentSchedule)) {
+      return res.status(400).json({ message: "Invalid payment schedule" });
+    }
 
-    // 🎯 CREATE SCHEDULE HERE (OUTSIDE)
-    const schedule = [
-      {
-        stage: "sowing",
-        amount: Math.round(totalAmount * 0.2),
-        status: "pending",
-        dueDate: new Date(),
-      },
-      {
-        stage: "growth",
-        amount: Math.round(totalAmount * 0.3),
-        status: "pending",
-        dueDate: new Date(Date.now() + 15 * 24 * 60 * 60 * 1000),
-      },
-      {
-        stage: "harvest",
-        amount: Math.round(totalAmount * 0.5),
-        status: "pending",
-        dueDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
-      },
-    ];
+    const cropValue = Number(price) * Number(quantity);
 
     const contract = await Contract.create({
       company: req.user._id,
@@ -53,41 +31,32 @@ exports.createContract = async (req, res) => {
       price,
       location,
 
-      riskSharing: {
-        enabled: riskSharing?.enabled || false,
-        farmerPercentage: riskSharing?.farmerPercentage || 0,
-        companyPercentage: riskSharing?.companyPercentage || 0,
+      payment: {
+        totalAmount: cropValue,
+
+        fundedAmount: 0,
+
+        // ✅ FIXED
+        finalPayable: cropValue,
+        remainingAmount: cropValue,
       },
 
-      insurance: {
-        provider: insurance?.provider || "",
-        coverageAmount: insurance?.coverageAmount || 0,
-        status: insurance?.status || "Not Active",
-      },
+      paymentSchedule: paymentSchedule.map((s) => ({
+        stage: s.stage.toLowerCase(),
+        amount: Number(s.amount),
+        status: "pending",
+      })),
 
-    payment: {
-  totalAmount,
-  advancePaid: advancePaid || 0, // funding
-  finalPayable: totalAmount, // will deduct later
-  isAdvancePaid: (advancePaid || 0) > 0,
-},
-
-      // ✅ NOW WORKS
-      paymentSchedule: schedule,
-
+      paymentHistory: [],
       applicants: [],
+      status: "open",
     });
 
-    if (req.user.verification?.status !== "verified") {
-      return res.status(403).json({
-        message: "Please verify your account first",
-      });
-    }
-
     res.status(201).json(contract);
-  } catch (error) {
-    console.error("Create Contract Error:", error);
-    res.status(500).json({ message: error.message });
+
+  } catch (err) {
+    console.error("🔥 CREATE CONTRACT ERROR:", err);
+    res.status(500).json({ message: err.message });
   }
 };
 // 👨‍🌾 Farmer views contracts
@@ -98,6 +67,7 @@ exports.getContracts = async (req, res) => {
       .populate("applicants.farmer", "name"); // optional but useful
 
     res.json(contracts);
+    console.log("Contracts found:", contracts.length);
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -112,7 +82,14 @@ exports.applyContract = async (req, res) => {
       return res.status(404).json({ message: "Contract not found" });
     }
 
-    // ✅ Check already applied
+    // ✅ check verification FIRST
+    if (req.user.verification?.status !== "verified") {
+      return res.status(403).json({
+        message: "Please verify your account first",
+      });
+    }
+
+    // ✅ already applied check
     const alreadyApplied = contract.applicants.find(
       (a) => a.farmer.toString() === req.user._id.toString()
     );
@@ -123,21 +100,14 @@ exports.applyContract = async (req, res) => {
       });
     }
 
-    // ✅ Add new applicant
+    // ✅ push
     contract.applicants.push({
       farmer: req.user._id,
       status: "pending",
     });
 
-    // ✅ Update contract status
-   
-
     await contract.save();
-if (req.user.verification?.status !== "verified") {
-  return res.status(403).json({
-    message: "Please verify your account first",
-  });
-}
+
     res.json({ message: "Applied successfully" });
   } catch (error) {
     console.error("Apply Error:", error);
@@ -145,6 +115,96 @@ if (req.user.verification?.status !== "verified") {
   }
 };
 
+exports.payStage = async (req, res) => {
+  try {
+    const { contractId, stageName } = req.body;
+
+    const contract = await Contract.findById(contractId);
+
+    if (!contract) {
+      return res.status(404).json({ message: "Contract not found" });
+    }
+
+    const stage = contract.paymentSchedule.find((s) => s.stage === stageName);
+
+    if (!stage) {
+      return res.status(404).json({ message: "Stage not found" });
+    }
+
+    if (stage.status === "paid") {
+      return res.status(400).json({ message: "Stage already paid" });
+    }
+
+    // ✅ Mark stage as paid
+    stage.status = "paid";
+
+    // ✅ Add funded amount
+    contract.payment.fundedAmount += stage.amount;
+
+    // 🔥 Deduction logic
+    contract.payment.finalPayable =
+      contract.payment.totalAmount - contract.payment.fundedAmount;
+
+    contract.payment.remainingAmount = contract.payment.finalPayable;
+
+    // ✅ Save history
+    contract.paymentHistory.push({
+      type: stageName,
+      amount: stage.amount,
+      date: new Date(),
+    });
+
+    await contract.save();
+
+    res.json({
+      message: `${stageName} funding successful`,
+      fundedAmount: contract.payment.fundedAmount,
+      finalPayable: contract.payment.finalPayable,
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: err.message });
+  }
+};
+
+// exports.finalPayment = async (req, res) => {
+//   try {
+//     const { contractId } = req.body;
+
+//     const contract = await Contract.findById(contractId);
+
+//     if (!contract) {
+//       return res.status(404).json({ message: "Contract not found" });
+//     }
+
+//     const amountToPay = contract.payment.finalPayable;
+
+//     if (amountToPay <= 0) {
+//       return res.status(400).json({
+//         message: "Nothing left to pay",
+//       });
+//     }
+
+//     // ✅ Mark contract completed
+//     contract.payment.remainingAmount = 0;
+//     contract.status = "completed";
+
+//     contract.paymentHistory.push({
+//       type: "final",
+//       amount: amountToPay,
+//       date: new Date(),
+//     });
+
+//     await contract.save();
+
+//     res.json({
+//       message: "Final payment completed",
+//       paid: amountToPay,
+//     });
+//   } catch (err) {
+//     res.status(500).json({ message: err.message });
+//   }
+// };
 
 // 🏢 Company view own contracts
 exports.getCompanyContracts = async (req, res) => {
@@ -162,7 +222,6 @@ exports.getCompanyContracts = async (req, res) => {
 };
 // 🏢 Company approves farmer
 
-
 exports.approveFarmer = async (req, res) => {
   try {
     const { contractId, farmerId } = req.body;
@@ -174,7 +233,7 @@ exports.approveFarmer = async (req, res) => {
     }
 
     const applicant = contract.applicants.find(
-      (a) => a.farmer.toString() === farmerId
+      (a) => a.farmer.toString() === farmerId,
     );
 
     if (!applicant) {
@@ -210,7 +269,6 @@ exports.approveFarmer = async (req, res) => {
   }
 };
 
-
 // 👨‍🌾 Farmer → My contracts
 // exports.getContracts = async (req, res) => {
 //   try {
@@ -239,7 +297,6 @@ exports.getFarmerContracts = async (req, res) => {
   }
 };
 
-
 exports.signAgreement = async (req, res) => {
   try {
     const { contractId } = req.body;
@@ -264,7 +321,7 @@ exports.signAgreement = async (req, res) => {
       (a) =>
         a.farmer &&
         a.farmer._id.toString() === userId &&
-        a.status === "approved"
+        a.status === "approved",
     );
 
     if (approvedFarmer) {
@@ -272,10 +329,7 @@ exports.signAgreement = async (req, res) => {
     }
 
     // ✅ Final Agreement Status
-    if (
-      contract.agreement.farmerSigned &&
-      contract.agreement.companySigned
-    ) {
+    if (contract.agreement.farmerSigned && contract.agreement.companySigned) {
       contract.agreement.isSigned = true;
       contract.status = "active";
     }
@@ -288,7 +342,6 @@ exports.signAgreement = async (req, res) => {
     res.status(500).json({ message: error.message });
   }
 };
-
 
 // exports.payAdvance = async (req, res) => {
 //   try {
@@ -363,9 +416,6 @@ exports.payInstallment = async (req, res) => {
   }
 };
 
-
-
-
 exports.downloadAgreement = async (req, res) => {
   try {
     const contract = await Contract.findById(req.params.id)
@@ -378,16 +428,13 @@ exports.downloadAgreement = async (req, res) => {
 
     // ✅ Get approved farmers
     const approvedFarmers = contract.applicants.filter(
-      (a) => a.status === "approved"
+      (a) => a.status === "approved",
     );
 
     const doc = new PDFDocument();
 
     res.setHeader("Content-Type", "application/pdf");
-    res.setHeader(
-      "Content-Disposition",
-      "attachment; filename=agreement.pdf"
-    );
+    res.setHeader("Content-Disposition", "attachment; filename=agreement.pdf");
 
     doc.pipe(res);
 
@@ -397,7 +444,7 @@ exports.downloadAgreement = async (req, res) => {
 
     doc.fontSize(12).text(`Crop: ${contract.cropName}`);
     doc.text(`Quantity: ${contract.quantity}`);
-doc.text(`Price: Rs. ${contract.price}`);
+    doc.text(`Price: Rs. ${contract.price}`);
     doc.text(`Location: ${contract.location}`);
     doc.moveDown();
 
@@ -417,73 +464,68 @@ doc.text(`Price: Rs. ${contract.price}`);
     doc.moveDown();
 
     doc.text(`Advance Paid: Rs. ${contract.payment?.advancePaid || 0}`);
-    
 
     doc.moveDown();
     doc.text(`Status: Signed Agreement`);
     doc.text(`Date: ${new Date().toLocaleDateString()}`);
 
+    doc.moveDown();
+    doc.moveDown();
+    doc.text("Crop Insurance:");
+
+    if (contract.insurance?.provider) {
+      console.log(contract.insurance?.provider);
+      doc.text(`Provider: ${contract.insurance.provider}`);
+      doc.text(`Coverage: Rs. ${contract.insurance.coverageAmount}`);
+      doc.text(`Status: ${contract.insurance.status}`);
+    } else {
+      doc.text("No Insurance");
+    }
+
+    doc.text("Risk Sharing:");
+
+    if (contract.riskSharing?.enabled) {
+      doc.text(`Farmer: ${contract.riskSharing.farmerPercentage}%`);
+      doc.text(`Company: ${contract.riskSharing.companyPercentage}%`);
+    } else {
+      doc.text("Not Enabled");
+    }
+    doc.moveDown();
+    doc.text("Signatures:");
+
+    // 👨‍🌾 Farmer Name
+    const farmerName = contract.applicants?.[0]?.farmer?.name || "N/A";
+
+    // 🏢 Company Name
+    const companyName = contract.company?.name || "N/A";
+
+    doc.text(
+      `Farmer Signed: ${contract.agreement?.farmerSigned ? "Yes" : "No"}`,
+    );
+    doc.text(
+      `Company Signed: ${contract.agreement?.companySigned ? "Yes" : "No"}`,
+    );
 
     doc.moveDown();
-doc.moveDown();
-doc.text("Crop Insurance:");
 
-if (contract.insurance?.provider) {
-  console.log(contract.insurance?.provider)
-  doc.text(`Provider: ${contract.insurance.provider}`);
-  doc.text(`Coverage: Rs. ${contract.insurance.coverageAmount}`);
-  doc.text(`Status: ${contract.insurance.status}`);
-} else {
-  doc.text("No Insurance");
-}
+    // ✅ Replace dashed lines with names
+    doc.text(`Farmer: ${farmerName}`);
+    doc.text(`Company: ${companyName}`);
 
-
-
-doc.text("Risk Sharing:");
-
-if (contract.riskSharing?.enabled) {
-  doc.text(`Farmer: ${contract.riskSharing.farmerPercentage}%`);
-  doc.text(`Company: ${contract.riskSharing.companyPercentage}%`);
-} else {
-  doc.text("Not Enabled");
-}
-doc.moveDown();
-doc.text("Signatures:");
-
-// 👨‍🌾 Farmer Name
-const farmerName =
-  contract.applicants?.[0]?.farmer?.name || "N/A";
-
-// 🏢 Company Name
-const companyName = contract.company?.name || "N/A";
-
-doc.text(`Farmer Signed: ${contract.agreement?.farmerSigned ? "Yes" : "No"}`);
-doc.text(`Company Signed: ${contract.agreement?.companySigned ? "Yes" : "No"}`);
-
-doc.moveDown();
-
-// ✅ Replace dashed lines with names
-doc.text(`Farmer: ${farmerName}`);
-doc.text(`Company: ${companyName}`);
-
-doc.moveDown();
-doc.text(
-  `Final Agreement: ${
-    contract.agreement?.isSigned ? "Completed" : "Pending"
-  }`
-);
-doc.text(`Farmer Signature: ${farmerName}`);
-doc.text(`Company Signature: ${companyName}`);
-doc.end()
-
-}catch (error) {
+    doc.moveDown();
+    doc.text(
+      `Final Agreement: ${
+        contract.agreement?.isSigned ? "Completed" : "Pending"
+      }`,
+    );
+    doc.text(`Farmer Signature: ${farmerName}`);
+    doc.text(`Company Signature: ${companyName}`);
+    doc.end();
+  } catch (error) {
     console.error("PDF ERROR:", error);
     res.status(500).json({ message: error.message });
   }
-}
-
-
-
+};
 
 const razorpay = new Razorpay({
   key_id: process.env.RAZORPAY_KEY_ID,
@@ -498,17 +540,12 @@ exports.payAdvance = async (req, res) => {
       amount: amount * 100,
       currency: "INR",
     });
-console.log("KEY:", process.env.RAZORPAY_KEY_ID);
+    console.log("KEY:", process.env.RAZORPAY_KEY_ID);
     res.json(order);
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
 };
-
-
-
-
-
 
 exports.verifyPayment = async (req, res) => {
   try {
@@ -528,14 +565,14 @@ exports.verifyPayment = async (req, res) => {
       .createHmac("sha256", process.env.RAZORPAY_SECRET)
       .update(body)
       .digest("hex");
-if (contract.payment.remainingAmount <= 0) {
-  return res.status(400).json({ message: "Already fully paid" });
-}
+
+    const contract = await Contract.findById(contractId);
+    if (contract.payment.remainingAmount <= 0) {
+      return res.status(400).json({ message: "Already fully paid" });
+    }
     if (expectedSignature !== razorpay_signature) {
       return res.status(400).json({ message: "Invalid signature" });
     }
-
-    const contract = await Contract.findById(contractId);
 
     if (!contract) {
       return res.status(404).json({ message: "Contract not found" });
@@ -550,15 +587,13 @@ if (contract.payment.remainingAmount <= 0) {
 
     // ✅ UPDATE PAYMENT
     contract.payment.advancePaid += payAmount;
-  // ✅ UPDATE FUNDING ONLY
-contract.payment.advancePaid += payAmount;
 
-contract.paymentHistory.push({
-  amount: payAmount,
-  type: "advance",
-});
+    contract.paymentHistory.push({
+      amount: payAmount,
+      type: "advance",
+    });
 
-contract.payment.isAdvancePaid = true;
+    contract.payment.isAdvancePaid = true;
 
     // ✅ HISTORY
     contract.paymentHistory.push({
@@ -582,8 +617,6 @@ contract.payment.isAdvancePaid = true;
     res.status(500).json({ message: err.message });
   }
 };
-
-
 
 exports.createInstallmentOrder = async (req, res) => {
   try {
@@ -635,7 +668,6 @@ exports.completeContract = async (req, res) => {
         finalPaidToFarmer: finalPayable,
       },
     });
-
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -696,25 +728,39 @@ exports.verifyInstallmentPayment = async (req, res) => {
     await contract.save();
 
     res.json({ message: "Installment paid ✅", contract });
-
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
 };
 
-
 exports.createStagePaymentOrder = async (req, res) => {
   try {
     const { contractId, stage } = req.body;
 
+    if (!contractId || !stage) {
+      return res.status(400).json({
+        message: "contractId and stage are required",
+      });
+    }
+
     const contract = await Contract.findById(contractId);
 
+    if (!contract) {
+      return res.status(404).json({ message: "Contract not found" });
+    }
+
     const stageData = contract.paymentSchedule.find(
-      (s) => s.stage === stage
+      (s) =>
+        s.stage &&
+        stage &&
+        s.stage.toLowerCase() === stage.toLowerCase()
     );
 
     if (!stageData) {
-      return res.status(404).json({ message: "Stage not found" });
+      return res.status(404).json({
+        message: "Stage not found",
+        available: contract.paymentSchedule.map((s) => s.stage),
+      });
     }
 
     if (stageData.status === "paid") {
@@ -726,64 +772,101 @@ exports.createStagePaymentOrder = async (req, res) => {
       currency: "INR",
     });
 
-    res.json({ order, stage });
+    res.json({ order, stage: stageData.stage });
+
   } catch (err) {
+    console.error("CREATE ORDER ERROR:", err);
     res.status(500).json({ message: err.message });
   }
 };
-
 
 exports.verifyStagePayment = async (req, res) => {
   try {
     const {
       contractId,
       stage,
-      razorpay_order_id,
       razorpay_payment_id,
+      razorpay_order_id,
       razorpay_signature,
     } = req.body;
 
-    const expectedSignature = crypto
-      .createHmac("sha256", process.env.RAZORPAY_SECRET)
-      .update(razorpay_order_id + "|" + razorpay_payment_id)
-      .digest("hex");
-
-    if (expectedSignature !== razorpay_signature) {
-      return res.status(400).json({ message: "Invalid payment" });
+    if (!contractId || !stage) {
+      return res.status(400).json({ message: "Missing data" });
     }
 
     const contract = await Contract.findById(contractId);
+    if (!contract) return res.status(404).json({ message: "Not found" });
 
+    // 🔐 verify signature
+    const body = razorpay_order_id + "|" + razorpay_payment_id;
+
+    const expectedSignature = crypto
+      .createHmac("sha256", process.env.RAZORPAY_SECRET)
+      .update(body)
+      .digest("hex");
+
+    if (expectedSignature !== razorpay_signature) {
+      return res.status(400).json({ message: "Invalid signature" });
+    }
+
+    // ✅ find stage
     const stageData = contract.paymentSchedule.find(
-      (s) => s.stage === stage
+      (s) => s.stage.toLowerCase() === stage.toLowerCase()
     );
 
+    if (!stageData) {
+      return res.status(400).json({ message: "Stage not found" });
+    }
+
+    if (stageData.status === "paid") {
+      return res.status(400).json({ message: "Already paid" });
+    }
+
+    // ✅ mark paid
     stageData.status = "paid";
 
-    contract.paymentHistory.push({
-      amount: stageData.amount,
-      type: "installment",
-    });
+    const funded = Number(contract.payment.fundedAmount || 0);
+    const stageAmount = Number(stageData.amount || 0);
 
-    contract.payment.remainingAmount -= stageData.amount;
+    // ✅ update ONLY investment
+    contract.payment.fundedAmount = funded + stageAmount;
 
-    // ✅ AUTO COMPLETE CONTRACT
-    const allPaid = contract.paymentSchedule.every(
+    // ✅ check if all stages completed
+    const allStagesPaid = contract.paymentSchedule.every(
       (s) => s.status === "paid"
     );
 
-    if (allPaid) {
-      contract.status = "completed";
+    if (allStagesPaid) {
+      const total = Number(contract.payment.totalAmount || 0);
+      const newFunded = Number(contract.payment.fundedAmount || 0);
+
+      const finalPayable = Math.max(total - newFunded, 0);
+
+      contract.payment.finalPayable = finalPayable;
+      contract.payment.remainingAmount = finalPayable;
     }
+
+    // ✅ history
+    contract.paymentHistory.push({
+      type: stage.toLowerCase(),
+      amount: stageAmount,
+      paymentId: razorpay_payment_id,
+      date: new Date(),
+    });
 
     await contract.save();
 
-    res.json({ message: "Stage payment successful ✅" });
+    res.json({
+      message: "Stage payment success",
+      fundedAmount: contract.payment.fundedAmount,
+      finalPayable: contract.payment.finalPayable,
+    });
+
   } catch (err) {
+    console.error(err);
     res.status(500).json({ message: err.message });
   }
 };
-
 exports.updateCompanyDetails = async (req, res) => {
   try {
     const user = await User.findById(req.user._id);
@@ -797,6 +880,187 @@ exports.updateCompanyDetails = async (req, res) => {
     await user.save();
 
     res.json({ message: "Company details updated", user });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+exports.finalPayment = async (req, res) => {
+  try {
+    const { contractId } = req.body;
+
+    const contract = await Contract.findById(contractId);
+
+    if (!contract) {
+      return res.status(404).json({ message: "Contract not found" });
+    }
+
+    const finalAmount = Number(contract.payment.finalPayable || 0);
+
+    // ❌ nothing to pay
+    if (finalAmount <= 0) {
+      return res.status(400).json({
+        message: "No final payment required",
+      });
+    }
+
+    // ✅ add to funded (total money paid by company)
+    contract.payment.fundedAmount += finalAmount;
+
+    // ✅ mark as fully paid
+    contract.payment.finalPayable = 0;
+    contract.payment.remainingAmount = 0;
+
+    // ✅ history
+    contract.paymentHistory.push({
+      type: "final",
+      amount: finalAmount,
+      date: new Date(),
+    });
+
+    // ✅ contract completed
+    contract.status = "completed";
+
+    await contract.save();
+
+    res.json({
+      message: "Final payment completed ✅",
+      finalAmount,
+    });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: err.message });
+  }
+};
+
+
+
+
+exports.createFinalOrder = async (req, res) => {
+  try {
+    const { contractId } = req.body;
+
+    const contract = await Contract.findById(contractId);
+
+    if (!contract) {
+      return res.status(404).json({ message: "Contract not found" });
+    }
+
+    const total = Number(contract.payment.totalAmount || 0);
+    const invested = Number(contract.payment.fundedAmount || 0);
+
+    const finalAmount = total - invested;
+
+    console.log("TOTAL:", total);
+    console.log("INVESTED:", invested);
+    console.log("FINAL ₹:", finalAmount);
+
+    if (finalAmount <= 0) {
+      return res.status(400).json({
+        message: "No final payment required",
+      });
+    }
+
+    // ✅ Razorpay limit protection (VERY IMPORTANT)
+    if (finalAmount > 500000) {
+      return res.status(400).json({
+        message: "Amount exceeds Razorpay limit (₹5,00,000). Split payment required.",
+      });
+    }
+
+    const amountInPaise = Math.round(finalAmount * 100);
+
+    console.log("FINAL PAISE:", amountInPaise);
+
+    // ✅ CREATE ORDER
+    const order = await razorpay.orders.create({
+      amount: amountInPaise,
+      currency: "INR",
+      receipt: `final_${contractId}`,
+    });
+
+    res.json({ order });
+
+  } catch (err) {
+    console.error("🔥 FINAL ORDER ERROR:", err);
+    res.status(500).json({
+      message: err.error?.description || err.message,
+    });
+  }
+};
+
+exports.verifyFinalPayment = async (req, res) => {
+  try {
+    const {
+      contractId,
+      razorpay_payment_id,
+      razorpay_order_id,
+      razorpay_signature,
+    } = req.body;
+
+    const contract = await Contract.findById(contractId);
+
+    const crypto = require("crypto");
+
+    const body = razorpay_order_id + "|" + razorpay_payment_id;
+
+    const expectedSignature = crypto
+      .createHmac("sha256", process.env.RAZORPAY_SECRET)
+      .update(body)
+      .digest("hex");
+
+    if (expectedSignature !== razorpay_signature) {
+      return res.status(400).json({ message: "Invalid signature" });
+    }
+
+    const total = contract.payment.totalAmount;
+    const invested = contract.payment.fundedAmount;
+    const finalAmount = total - invested;
+
+    // ✅ SAVE FINAL PAYMENT
+    contract.paymentHistory.push({
+      type: "final",
+      amount: finalAmount,
+      paymentId: razorpay_payment_id,
+      date: new Date(),
+    });
+contract.payment.finalPayable = 0; // ✅ reset after payment
+contract.payment.fundedAmount = contract.payment.totalAmount; // optional (full paid)
+    contract.status = "completed";
+
+    await contract.save();
+
+    res.json({ message: "Final payment success ✅" });
+
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+
+exports.markReadyForSale = async (req, res) => {
+  try {
+    const { contractId } = req.body;
+
+    const contract = await Contract.findById(contractId);
+
+    if (!contract) {
+      return res.status(404).json({ message: "Contract not found" });
+    }
+
+    // ✅ Only farmer should do this (optional check)
+    // if (contract.farmer.toString() !== req.user._id.toString()) {
+    //   return res.status(403).json({ message: "Not allowed" });
+    // }
+
+    contract.readyForSale = true;
+
+    await contract.save();
+
+    res.json({
+      message: "Farming marked as completed ✅",
+    });
+
   } catch (err) {
     res.status(500).json({ message: err.message });
   }

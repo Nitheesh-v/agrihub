@@ -15,7 +15,8 @@ const {
   verifyPayment,
   createInstallmentOrder,
   verifyInstallmentPayment,updateCompanyDetails,
-  createStagePaymentOrder,verifyStagePayment,completeContract,
+  createStagePaymentOrder,verifyStagePayment,completeContract,payStage,finalPayment,createFinalOrder,verifyFinalPayment,
+  markReadyForSale,
 } = require("../controllers/contractController");
 
 const { protect, authorizeRoles } = require("../middleware/authMiddleware");
@@ -53,6 +54,16 @@ router.get("/agreement/:id", protect, downloadAgreement);
 
 router.post("/stage/create", protect, createStagePaymentOrder);
 router.post("/stage/verify", protect, verifyStagePayment);
+
+router.post("/stage/pay", protect, payStage);
+router.post("/final/pay", protect, finalPayment);
+
+
+router.post("/final/create", protect, createFinalOrder);
+router.post("/final/verify", protect, verifyFinalPayment);
+
+router.post("/ready", protect, markReadyForSale);
+
 
 router.put("/company/details", protect, updateCompanyDetails);
 module.exports = router;
